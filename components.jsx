@@ -671,7 +671,7 @@ function KeyHint({T, keys, label}) {
 function Desktop({T, tweaks, currentFolder, folders, folderOrder, notes, allNotes, noteRefs, linkLines,
   links, addLink, removeLink, linksFor,
   updateNote, bringToFront, bringGroupToFront, focusNote, onDeleteNote, selectedIds, setSelectedIds, setNotes,
-  jumpToNote, moveNoteToFolder, moveNotesToFolder, onCreateNote, onImportMarkdown, onCopyNotes,
+  jumpToNote, moveNoteToFolder, moveNotesToFolder, onCreateFolderForNote, onCreateNote, onImportMarkdown, onCopyNotes,
   view, setView, drawerOpen, takeSnapshot}) {
 
   // Tree-ordered folder list (with depth) for the per-note "Move to folder"
@@ -1261,6 +1261,7 @@ function Desktop({T, tweaks, currentFolder, folders, folderOrder, notes, allNote
             onLinkClick={jumpToNote}
             childFolders={folderTreeRows.filter(r=>r.id!==n.folder).map(r=>({...folders[r.id], depth:r.depth}))}
             onMoveToFolder={(fid)=>moveNoteToFolder(n.id, fid)}
+            onCreateFolder={()=>onCreateFolderForNote(n.id)}
             zoom={view.z}
             allNotes={allNotes}
             linksFor={linksFor}
@@ -1442,7 +1443,7 @@ function startPointerDrag(e, onMove, onEnd) {
 }
 function StickyNote({note, T, tweaks, folder, refCb, selected, selectedIds, setSelectedIds, setNotes,
   bringGroupToFront,
-  onFocus, onChange, onTogglePin, onDelete, onLinkClick, childFolders, onMoveToFolder, onMoveNotesToFolder, zoom=1,
+  onFocus, onChange, onTogglePin, onDelete, onLinkClick, childFolders, onMoveToFolder, onCreateFolder, onMoveNotesToFolder, zoom=1,
   allNotes=[], linksFor, onAddLink, onStartLink, onJumpToNote, onCopy, onSnapshot}) {
   const zRef = useRef(zoom); zRef.current = zoom;
   const [editing, setEditing] = useState(false);
@@ -1720,7 +1721,7 @@ function StickyNote({note, T, tweaks, folder, refCb, selected, selectedIds, setS
 
   useEffect(() => { refCb(el.current); return ()=>refCb(null); }, [refCb]);
 
-  const col = NOTE_COLORS.find(c => c.id===note.color) || NOTE_COLORS[0];
+  const col = resolveNoteColor(note.color);
   const bg = tweaks.theme==='paper' ? col.paper : tweaks.theme==='flat' ? col.flat : col.term;
   const ink = col.ink;
 
@@ -1738,7 +1739,7 @@ function StickyNote({note, T, tweaks, folder, refCb, selected, selectedIds, setS
   const bodyHtml = useMemo(() => mdToHtml(note.body), [note.body]);
 
   // Shared move-note drag. The header is the primary handle; the free
-  // stretch of the footer bar (left of the color dots) reuses it so a note
+  // stretch of the footer bar reuses it so a note
   // whose header sits outside the viewport can still be moved (issue #16).
   const startDrag = (e) => {
     e.stopPropagation();
@@ -2158,17 +2159,15 @@ function StickyNote({note, T, tweaks, folder, refCb, selected, selectedIds, setS
         )}
       </div>
 
-      {/* Footer: everything left of the color dots is a second drag handle
-          (issue #16 — the note stays movable when the header is scrolled out
-          of view). Presses on the dots fall through to their onClick, so
-          adding more dots later just shrinks the grab area. */}
+      {/* Footer: a second drag handle outside the folder and color buttons, so the
+          note stays movable when the header is scrolled out of view. */}
       <div onPointerDown={e=>{ if (e.button===0 && !e.target.closest('button')) startDrag(e); }}
         title="Drag to move"
         style={{
-        padding:'5px 10px', display:'flex', alignItems:'center', gap:6, flex:'none',
+        padding:'4px 16px 4px 10px', display:'flex', alignItems:'center', gap:6, flex:'none',
         borderTop: tweaks.theme==='terminal' ? `1px solid ${T.panelBorder}` : '1px solid rgba(0,0,0,.05)',
         background: tweaks.theme==='terminal' ? 'rgba(0,0,0,.2)' : 'transparent',
-        fontSize:10, color:ink, opacity:.75,
+        fontSize:10, color:ink,
         cursor:'grab', userSelect:'none', touchAction:'none',
       }}>
         <svg width="14" height="8" viewBox="0 0 14 8" aria-hidden="true" style={{flex:'none', opacity:.45}}>
@@ -2178,7 +2177,11 @@ function StickyNote({note, T, tweaks, folder, refCb, selected, selectedIds, setS
           </g>
         </svg>
         <div style={{flex:1}}/>
-        <ColorDots current={note.color} onPick={c=>onChange({color:c})} ink={ink}/>
+        <NoteColorPicker T={T} theme={tweaks.theme} color={note.color}
+          onPick={color=>{ if (color !== note.color) { onSnapshot?.(); onChange({color}); } }}
+          onCustomPick={(color, firstChange)=>{ if (firstChange) onSnapshot?.(); onChange({color}); }}/>
+        <NoteFolderPicker T={T} theme={tweaks.theme} folder={folder} folderId={note.folder}
+          folders={childFolders} onPick={onMoveToFolder} onCreate={onCreateFolder}/>
       </div>
 
       <div onPointerDown={onResize}
@@ -2213,7 +2216,7 @@ function StickyNote({note, T, tweaks, folder, refCb, selected, selectedIds, setS
             {label: note.pinned?'Unpin':'Pin to top', onClick:()=>{ if (onTogglePin) onTogglePin(); else onChange({pinned:!note.pinned}); }},
             {divider:true},
             {label:'Link to note ▶', submenu: candidates.map(n => ({
-              label: n.title || 'Untitled', dot: (NOTE_COLORS.find(c=>c.id===n.color)||{}).paper,
+              label: n.title || 'Untitled', dot: resolveNoteColor(n.color).paper,
               onClick: () => onAddLink && onAddLink(n.id),
             }))},
             {label:'Draw link…', onClick: () => onStartLink && onStartLink()},
@@ -2229,25 +2232,203 @@ function StickyNote({note, T, tweaks, folder, refCb, selected, selectedIds, setS
     </div>
   );
 }
-function btnS(ink) { return {background:'transparent', border:'none', cursor:'pointer', padding:4, borderRadius:4, display:'grid', placeItems:'center', color:ink, opacity:.65}; }
-function ColorDots({current, onPick, ink}) {
-  return <div style={{display:'flex', gap:4}}>
-    {NOTE_COLORS.slice(0,6).map(c => (
-      // 10px targets with no hover feedback at all before issue #49: a ring
-      // in the note's own ink plus a small pop says which one is under the
-      // cursor without changing the swatch colour itself.
-      <button key={c.id} onClick={()=>onPick(c.id)} title={c.name}
-        onMouseEnter={e=>{ e.currentTarget.style.boxShadow = `0 0 0 2px ${withA(ink,.45)}`; e.currentTarget.style.transform = 'scale(1.25)'; }}
-        onMouseLeave={e=>{ e.currentTarget.style.boxShadow = 'none'; e.currentTarget.style.transform = 'none'; }}
-        style={{
-        width:10, height:10, borderRadius:'50%',
-        border: current===c.id ? `1.5px solid ${ink}` : '1px solid rgba(0,0,0,.15)',
-        background:c.paper, cursor:'pointer', padding:0,
-        transition:'transform .1s, box-shadow .1s',
-      }}/>
-    ))}
-  </div>;
+function NoteFolderPicker({T, theme, folder, folderId, folders, onPick, onCreate}) {
+  return <NoteChoicePicker T={T} theme={theme} kind="folder" label="Move note to folder"
+    options={[{...folder, id:folderId, name:folder?.name || 'All notes'}, ...folders]}
+    selectedId={folderId} triggerName={folder?.name || 'All notes'} triggerHue={folder?.hue || '#888'}
+    onPick={onPick} onAction={onCreate} actionLabel="Create folder"/>;
 }
+function NoteColorPicker({T, theme, color, onPick, onCustomPick}) {
+  const input = useRef(null);
+  const customChanged = useRef(false);
+  const currentColor = useRef(color); currentColor.current = color;
+  const col = resolveNoteColor(color);
+  const options = NOTE_COLORS.map(c => ({id:c.id, name:c.name, hue:mixHex(c.paper, c.ink, .2)}));
+  if (!NOTE_COLORS.some(c=>c.id === color)) options.unshift({id:color, name:'Custom color', hue:col.paper});
+  return <>
+    <input ref={input} type="color" aria-label="Custom sticky note color" tabIndex={-1}
+      style={{position:'fixed', width:1, height:1, opacity:0, pointerEvents:'none'}}
+      onChange={e=>{
+        if (e.target.value === currentColor.current) return;
+        onCustomPick(e.target.value, !customChanged.current);
+        customChanged.current = true;
+      }}/>
+    <NoteChoicePicker T={T} theme={theme} kind="color" label="Change note color"
+      options={options} selectedId={color} triggerName={col.name}
+      triggerHue={options.find(c=>c.id === color)?.hue || col.paper} triggerInk={col.ink}
+      onPick={onPick} actionLabel="Custom color…" actionTop onAction={()=>{
+        customChanged.current = false;
+        input.current.value = col.paper;
+        input.current.click();
+      }}/>
+  </>;
+}
+function NoteChoicePicker({T, theme, kind, label, options, selectedId, triggerName, triggerHue, triggerInk,
+  onPick, onAction, actionLabel, actionTop=false}) {
+  const trigger = useRef(null);
+  const popover = useRef(null);
+  const list = useRef(null);
+  const actionButton = useRef(null);
+  const id = React.useId();
+  const [position, setPosition] = useState(null);
+  const [active, setActive] = useState(0);
+  const open = position !== null;
+  const background = triggerHue;
+  const selectedIndex = Math.max(0, options.findIndex(option=>option.id === selectedId));
+  const menuBg = theme === 'paper' ? '#fbf1dc' : T.panelBg;
+  const menuInk = theme === 'paper' ? '#382916' : T.panelText;
+  const menuBorder = theme === 'paper' ? '#dfd0ae' : T.panelBorder;
+  const close = () => { setPosition(null); trigger.current?.focus(); };
+  const pick = (targetId) => { close(); if (targetId !== selectedId) onPick(targetId); };
+
+  // Render in screen space so note rotation, zoom and clipping do not affect
+  // the menu. Prefer below the tag, or above when near the viewport bottom.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const anchor = trigger.current.getBoundingClientRect();
+    const menu = popover.current.getBoundingClientRect();
+    const left = Math.max(8, Math.min(anchor.left + 12, window.innerWidth - menu.width - 8));
+    const above = (kind === 'color' && anchor.top - menu.height - 8 >= 8)
+      || anchor.bottom + 8 + menu.height > window.innerHeight - 8;
+    setPosition({
+      left, above,
+      top:above ? Math.max(8, anchor.top - menu.height - 8) : anchor.bottom + 8,
+      arrowLeft:Math.max(16, Math.min(anchor.left + anchor.width / 2 - left, menu.width - 16)),
+    });
+    list.current.focus();
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const outside = e => {
+      if (!trigger.current?.contains(e.target) && !popover.current?.contains(e.target)) setPosition(null);
+    };
+    const viewportChanged = e => { if (!popover.current?.contains(e.target)) setPosition(null); };
+    document.addEventListener('pointerdown', outside, true);
+    window.addEventListener('resize', viewportChanged);
+    window.addEventListener('scroll', viewportChanged, true);
+    return () => {
+      document.removeEventListener('pointerdown', outside, true);
+      window.removeEventListener('resize', viewportChanged);
+      window.removeEventListener('scroll', viewportChanged, true);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (open) list.current?.children[active]?.scrollIntoView({block:'nearest'});
+  }, [open, active]);
+
+  const onKey = e => {
+    e.stopPropagation();
+    if (e.key === 'Tab') {
+      if (!e.shiftKey && actionButton.current) { e.preventDefault(); actionButton.current.focus(); }
+      else { e.preventDefault(); close(); }
+      return;
+    }
+    if (e.key === 'Escape') { e.preventDefault(); close(); return; }
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(options[active].id); return; }
+    if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) {
+      e.preventDefault();
+      setActive(i => e.key === 'Home' ? 0 : e.key === 'End' ? options.length - 1
+        : (i + (e.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length);
+    } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const match = options.findIndex((_, offset) => options[(active + offset + 1) % options.length].name.toLocaleLowerCase().startsWith(e.key.toLocaleLowerCase()));
+      if (match >= 0) setActive((active + match + 1) % options.length);
+    }
+  };
+
+  const action = onAction && <div style={{
+    ...(actionTop ? {borderBottom:`1px solid ${menuBorder}`, marginBottom:7, paddingBottom:6}
+      : {borderTop:`1px solid ${menuBorder}`, marginTop:7, paddingTop:6}),
+  }}>
+    <button ref={actionButton} type="button" onClick={()=>{ close(); onAction(); }}
+      onKeyDown={e=>{
+        e.stopPropagation();
+        if (e.key === 'Escape') { e.preventDefault(); close(); }
+        if (e.key === 'Tab' && e.shiftKey) { e.preventDefault(); list.current.focus(); }
+      }}
+      onMouseEnter={e=>{e.currentTarget.style.background=withA(menuInk,.06);}}
+      onMouseLeave={e=>{e.currentTarget.style.background='transparent';}}
+      style={{display:'flex', alignItems:'center', gap:14, width:'100%', padding:'7px 10px',
+        border:0, borderRadius:6, background:'transparent', color:menuInk, textAlign:'left',
+        fontFamily:'inherit', fontSize:13, lineHeight:'20px', cursor:'pointer'}}>
+      {!actionTop && <svg aria-hidden="true" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" style={{flex:'none'}}><path d="M10 3v14M3 10h14"/></svg>}
+      {actionLabel}
+    </button>
+  </div>;
+
+  return <>
+    <button ref={trigger} type="button" data-folder-tag={kind === 'folder' ? true : undefined}
+      data-note-color={kind === 'color' ? true : undefined} aria-label={label}
+      aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? id : undefined}
+      title={`${label} · ${triggerName}`}
+      onPointerDown={e=>e.stopPropagation()}
+      onClick={e=>{
+        e.stopPropagation();
+        if (open) { close(); return; }
+        const r = trigger.current.getBoundingClientRect();
+        setActive(selectedIndex); setPosition({left:r.left + 12, top:r.bottom + 8, above:false, arrowLeft:16});
+      }}
+      onKeyDown={e=>{
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); trigger.current.click(); }
+      }}
+      style={{display:'inline-flex', alignItems:'center', justifyContent:'center', gap:5, minWidth:0, maxWidth:'calc(100% - 50px)',
+        ...(kind === 'color' ? {width:18, height:18, padding:0, flex:'none', borderRadius:'50%'}
+          : {padding:'1px 6px', borderRadius:theme==='terminal' ? 2 : 8}),
+        background, color:isDarkSurface(background) ? '#fff' : '#111', border:'none', cursor:'pointer',
+        boxShadow:kind === 'color' ? `inset 0 0 0 1.5px ${withA(triggerInk || '#222', .7)}` : 'none',
+        fontFamily:'inherit', fontSize:10, fontWeight:500, lineHeight:'14px'}}>
+      {kind === 'folder' && <>
+        <span dir="auto" style={{overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>{triggerName}</span>
+        <svg width="9" height="9" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true" style={{flex:'none'}}><path d="m2 4 4 4 4-4"/></svg>
+      </>}
+    </button>
+    {open && ReactDOM.createPortal(
+      <div ref={popover} data-folder-popover={kind === 'folder' ? true : undefined}
+        data-note-color-popover={kind === 'color' ? true : undefined}
+        onPointerDown={e=>e.stopPropagation()} onClick={e=>e.stopPropagation()}
+        onBlur={e=>{
+          if (!e.currentTarget.contains(e.relatedTarget) && !trigger.current?.contains(e.relatedTarget)) setPosition(null);
+        }}
+        style={{position:'fixed', left:position.left, top:position.top, width:212, maxWidth:'calc(100vw - 16px)',
+          maxHeight:'calc(100vh - 16px)', padding:8, zIndex:99999,
+          background:menuBg, color:menuInk, border:`1px solid ${menuBorder}`, borderRadius:10,
+          boxShadow:'0 12px 30px rgba(65,45,20,.18), 0 2px 4px rgba(65,45,20,.06)',
+          display:'flex', flexDirection:'column'}}>
+        <span aria-hidden="true" style={{position:'absolute', left:position.arrowLeft - 5,
+          ...(position.above ? {bottom:-6, borderRight:`1px solid ${menuBorder}`, borderBottom:`1px solid ${menuBorder}`}
+            : {top:-6, borderLeft:`1px solid ${menuBorder}`, borderTop:`1px solid ${menuBorder}`}),
+          width:10, height:10, transform:'rotate(45deg)', background:menuBg, pointerEvents:'none'}}/>
+        {actionTop && action}
+        <div ref={list} id={id} role="listbox" aria-label={label} tabIndex={-1}
+          aria-activedescendant={`${id}-${active}`} onKeyDown={onKey}
+          style={{position:'relative', minHeight:0, maxHeight:'min(280px, calc(100vh - 90px))',
+            overflowY:'auto', outline:'none', display:'flex', flexDirection:'column', gap:2}}>
+        {options.map((f, i) => {
+          const hue = f.hue || '#888';
+          const selected = f.id === selectedId;
+          return <button key={f.id} id={`${id}-${i}`} type="button" role="option" aria-selected={selected}
+            tabIndex={-1} title={f.name} onMouseEnter={()=>setActive(i)}
+            onPointerDown={e=>e.preventDefault()} onClick={()=>pick(f.id)}
+            style={{display:'flex', alignItems:'center', justifyContent:'flex-start', gap:14, flexShrink:0,
+              width:'100%', padding:'5px 10px', border:0, borderRadius:6, textAlign:'left',
+              background:selected ? withA(hue,.18) : active === i ? withA(hue,.1) : 'transparent',
+              color:menuInk, cursor:'pointer', outline:'none',
+              boxShadow:active === i && !selected ? `inset 0 0 0 1px ${withA(hue,.35)}` : 'none',
+              fontFamily:'inherit', fontSize:13, lineHeight:'20px', fontWeight:selected ? 600 : 400}}>
+            <span aria-hidden="true" data-folder-color={kind === 'folder' ? true : undefined}
+              style={{width:kind === 'color' ? 14 : 4, height:kind === 'color' ? 14 : 18,
+                borderRadius:kind === 'color' ? 3 : 2, background:hue, flex:'none'}}/>
+            <span dir="auto" style={{minWidth:0, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>{f.name}</span>
+            {selected && <svg aria-hidden="true" width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{marginLeft:'auto', flex:'none'}}><path d="m4 10 4 4 8-9"/></svg>}
+          </button>;
+        })}
+        </div>
+        {!actionTop && action}
+      </div>, document.body)}
+  </>;
+}
+function btnS(ink) { return {background:'transparent', border:'none', cursor:'pointer', padding:4, borderRadius:4, display:'grid', placeItems:'center', color:ink, opacity:.65}; }
 /* ==================================================================== */
 /* CONTEXT MENU                                                          */
 /* ==================================================================== */
@@ -2373,7 +2554,7 @@ function ConfirmDialog({T, title, body, onCancel, onConfirm, confirmLabel='Delet
 /* FOLDERS DRAWER (right side — list of folders)                         */
 /* ==================================================================== */
 function FoldersDrawer({T, tweaks, folders, notes, currentFolder, setCurrentFolder,
-  onCreateFolder, onRenameFolder, renamingFolder, setRenamingFolder, onDeleteFolder,
+  onCreateFolder, onRenameFolder, onChangeFolderColor, renamingFolder, setRenamingFolder, onDeleteFolder,
   onMoveFolderToParent,
   onDropNoteOnFolder, onDropNotesOnFolder, onCreateNote,
   open, setOpen,
@@ -2385,8 +2566,12 @@ function FoldersDrawer({T, tweaks, folders, notes, currentFolder, setCurrentFold
   // is in. Shape: {id, zone: 'before'|'after'|'into'} | null.
   const [dragOver, setDragOver] = useState(null);
   // Right-click context menu on a folder row.
-  // Shape: {x, y, folderId, mode?: 'move'} | null.
+  // Shape: {x, y, folderId, mode?: 'move'|'color'} | null.
   const [folderMenu, setFolderMenu] = useState(null);
+  // Keep the native picker mounted after its context menu closes, and
+  // remember the folder it belongs to while the user chooses a color.
+  const folderColorInput = useRef(null);
+  const colorPickerFolderId = useRef(null);
   // Collapsed subtrees (drawer-local UI state, not persisted). A collapsed
   // parent hides all of its descendant rows; its own count still reflects
   // the whole subtree.
@@ -2518,10 +2703,7 @@ function FoldersDrawer({T, tweaks, folders, notes, currentFolder, setCurrentFold
       if (isAll) return;
       e.preventDefault();
       e.stopPropagation();
-      let host = e.currentTarget.parentElement;
-      while (host && getComputedStyle(host).position === 'static') host = host.parentElement;
-      const rect = host ? host.getBoundingClientRect() : {left:0, top:0};
-      setFolderMenu({x: e.clientX - rect.left, y: e.clientY - rect.top, folderId: f.id});
+      setFolderMenu({x: e.clientX, y: e.clientY, folderId: f.id});
     };
 
     // ─── Paper variant: washi-tape row, no chip icon (real folders only) ───
@@ -2735,6 +2917,12 @@ function FoldersDrawer({T, tweaks, folders, notes, currentFolder, setCurrentFold
 
   return (
     <>
+      <input ref={folderColorInput} type="color" aria-label="Custom folder color" tabIndex={-1}
+        style={{position:'fixed', width:1, height:1, opacity:0, pointerEvents:'none'}}
+        onChange={e=>{
+          const folderId = colorPickerFolderId.current;
+          if (folderId && folders[folderId]) onChangeFolderColor(folderId, e.target.value);
+        }}/>
       {!open && (
         <button onClick={()=>setOpen(true)} {...hoverProps(T, T.panelBg)} style={{
           position:'absolute', right:0, top:72, zIndex:19000,
@@ -2842,23 +3030,46 @@ function FoldersDrawer({T, tweaks, folders, notes, currentFolder, setCurrentFold
             </button>
           </div>
 
-          {folderMenu && folderMenu.mode !== 'move' && (
-            <ContextMenu T={T} x={folderMenu.x} y={folderMenu.y}
+          {folderMenu && !folderMenu.mode && (
+            <ContextMenu T={T} x={folderMenu.x} y={folderMenu.y} fixed
               onClose={()=>setFolderMenu(null)}
               items={[
                 {label:'Rename', onClick:()=>setRenamingFolder(folderMenu.folderId)},
+                {label:'Change color…', keepOpen:true, onClick:()=>setFolderMenu(m => m && ({...m, mode:'color'}))},
                 {label:'New subfolder', onClick:()=>{ expandFolder(folderMenu.folderId); onCreateFolder(folderMenu.folderId); }},
-                // Swaps this menu for a second flat "pick the destination"
-                // menu — a hover submenu would clip against the drawer's
-                // overflow:hidden since the drawer hugs the window edge.
+                // Use a second flat menu to keep destinations reachable
+                // when the drawer hugs the window edge.
                 {label:'Move to…', keepOpen:true, onClick:()=>setFolderMenu(m => m && ({...m, mode:'move'}))},
                 {divider:true},
                 {label:'Delete folder', destructive:true, onClick:()=>onDeleteFolder(folderMenu.folderId)},
               ]}
             />
           )}
+          {folderMenu && folderMenu.mode === 'color' && (
+            <ContextMenu T={T} x={folderMenu.x} y={folderMenu.y} fixed
+              onClose={()=>setFolderMenu(null)}
+              items={[
+                {label:'‹ Back', keepOpen:true, onClick:()=>setFolderMenu(m => m && ({...m, mode:undefined}))},
+                {divider:true},
+                {label:'Custom color…', onClick:()=>{
+                  colorPickerFolderId.current = folderMenu.folderId;
+                  folderColorInput.current.value = '#' + normHex(folders[folderMenu.folderId]?.hue || '#888');
+                  folderColorInput.current.click();
+                }},
+                {divider:true},
+                ...FOLDER_HUES.map((hue, i) => ({
+                  label:<span style={{display:'flex', alignItems:'center', gap:8}}>
+                    <span aria-hidden="true" style={{width:12, height:12, borderRadius:3, background:hue, flex:'none'}}/>
+                    {['Coral', 'Blue', 'Purple', 'Green', 'Amber', 'Rose', 'Teal', 'Olive'][i]}
+                    {folders[folderMenu.folderId]?.hue === hue && <span style={{marginLeft:'auto'}} aria-label="Current color">✓</span>}
+                  </span>,
+                  onClick:()=>onChangeFolderColor(folderMenu.folderId, hue),
+                })),
+              ]}
+            />
+          )}
           {folderMenu && folderMenu.mode === 'move' && (
-            <ContextMenu T={T} x={folderMenu.x} y={folderMenu.y}
+            <ContextMenu T={T} x={folderMenu.x} y={folderMenu.y} fixed
               onClose={()=>setFolderMenu(null)}
               items={(() => {
                 const fid = folderMenu.folderId;
@@ -3089,4 +3300,4 @@ function StatusBar({T, tweaks, folderName, noteCount, folderCount, onOpenPrefs})
   );
 }
 
-Object.assign(window, { AppGlyph, ColorDots, ConfirmDialog, ContextMenu, Desktop, EmptyState, FolderIcon, FolderTree, FoldersDrawer, HomeIcon, IMPORT_FROM_IMAGE_PROMPT, ImportFromImageDialog, InfoDialog, KeyHint, Label, Loading, MOBILE_BANNER_DISMISSED_KEY, MOBILE_BANNER_MAX_WIDTH, MobileDemoBanner, PanelAction, PasteErrorToast, Segmented, StatusBar, StickyNote, TopChrome, TweakPanel, UpdateBanner, btnS, kbdS, zBtn });
+Object.assign(window, { AppGlyph, ConfirmDialog, ContextMenu, Desktop, EmptyState, FolderIcon, FolderTree, FoldersDrawer, HomeIcon, IMPORT_FROM_IMAGE_PROMPT, ImportFromImageDialog, InfoDialog, KeyHint, Label, Loading, MOBILE_BANNER_DISMISSED_KEY, MOBILE_BANNER_MAX_WIDTH, MobileDemoBanner, PanelAction, PasteErrorToast, Segmented, StatusBar, StickyNote, TopChrome, TweakPanel, UpdateBanner, btnS, kbdS, zBtn });

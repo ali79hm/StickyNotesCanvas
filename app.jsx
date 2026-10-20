@@ -64,7 +64,7 @@ function AppInner({ store, setKey, exportNow, importNow, takeSnapshot, undo, red
   const folders  = store.folders;
   const notes    = store.notes;
   const links    = store.links;
-  const currentFolder = store.cwd;
+  const currentFolder = folders[store.cwd] ? store.cwd : 'root';
 
   const setTweaks  = (v) => setKey('tweaks',  v);
   const setFolders = (v) => setKey('folders', v);
@@ -232,6 +232,7 @@ function AppInner({ store, setKey, exportNow, importNow, takeSnapshot, undo, red
     setFolderOrder(order => [...(order || []), id]);
     setCurrentFolder(id);
     setRenamingFolder(id);
+    return id;
   };
 
   const deleteFolder = (id) => {
@@ -416,7 +417,7 @@ function AppInner({ store, setKey, exportNow, importNow, takeSnapshot, undo, red
       newIds.push(id);
       if (p.id) idMap.set(p.id, id);
       zRef.current += 1;
-      const validColor = NOTE_COLORS.some(c => c.id === p.color);
+      const validColor = typeof p.color === 'string' && resolveNoteColor(p.color).id === p.color;
       return {
         id,
         folder: targetFolder,
@@ -693,6 +694,11 @@ function AppInner({ store, setKey, exportNow, importNow, takeSnapshot, undo, red
         currentFolder={currentFolder} setCurrentFolder={setCurrentFolder}
         onCreateFolder={createFolder}
         onRenameFolder={(id, name)=>updateFolder(id,{name})}
+        onChangeFolderColor={(id, hue)=>{
+          if (folders[id]?.hue === hue) return;
+          takeSnapshot();
+          updateFolder(id,{hue});
+        }}
         renamingFolder={renamingFolder} setRenamingFolder={setRenamingFolder}
         onDeleteFolder={(id)=>setConfirmDel({kind:'folder', id})}
         onMoveFolderToParent={moveFolderToParent}
@@ -721,6 +727,11 @@ function AppInner({ store, setKey, exportNow, importNow, takeSnapshot, undo, red
         jumpToNote={jumpToNote}
         moveNoteToFolder={moveNoteToFolder}
         moveNotesToFolder={moveNotesToFolder}
+        onCreateFolderForNote={(noteId)=>{
+          const folderId = createFolder();
+          moveNoteToFolder(noteId, folderId);
+          setKey('drawer', true);
+        }}
         onCreateNote={createNote}
         onImportMarkdown={importMarkdown}
         onCopyNotes={copySelected}
